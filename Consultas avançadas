@@ -1,0 +1,90 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import broadcast
+
+## 1. Inicializar a sessão Spark
+spark = SparkSession.builder \
+    .appName("OtimizacaoJoinVideosComentarios") \
+    .config("spark.sql.adaptive.enabled", "true") \  # Habilitar otimização adaptativa
+    .config("spark.sql.autoBroadcastJoinThreshold", "100MB") \  # Ajustar limite para broadcast
+    .getOrCreate()
+
+## 2. Ler os arquivos Parquet
+# Carregar dados de vídeos
+df_video = spark.read.parquet('videos-preparados.snappy.parquet')
+# Carregar dados de comentários
+df_comments = spark.read.parquet('video-comments-tratados.snappy.parquet')
+
+## 3. Criar tabelas temporárias
+df_video.createOrReplaceTempView("videos_temp")
+df_comments.createOrReplaceTempView("comments_temp")
+
+## 4. Join básico usando spark.sql (abordagem inicial)
+join_video_comments = spark.sql("""
+    SELECT v.*, c.comment_text, c.comment_likes
+    FROM videos_temp v
+    JOIN comments_temp c ON v.video_id = c.video_id
+""")
+
+## 5. Versão com repartition e coalesce (abordagem intermediária)
+# Reparticionar os DataFrames antes do join
+df_video_repart = df_video.repartition(100, "video_id")
+df_comments_repart = df_comments.repartition(100, "video_id")
+
+# Fazer o join com DataFrames reparticionados
+join_repart = df_video_repart.join(df_comments_repart, "video_id")
+
+# Coalescer para reduzir o número de partições após o join
+join_repart_coalesced = join_repart.coalesce(50)
+
+## 6. Análise de desempenho com explain()
+print("=== Plano de execução para join básico ===")
+join_video_comments.explain(True)  # Mostrar plano de execução detalhado
+
+print("\n=== Plano de execução para join com repartition ===")
+join_repart.explain(True)
+
+## 7. Versão otimizada (abordagem final)
+"""
+Otimizações aplicadas:
+1. Selecionar apenas colunas necessárias para reduzir o volume de dados
+2. Filtro early para remover dados desnecessários antes do join
+3. Broadcast join para a tabela menor (se aplicável)
+4. Particionamento inteligente baseado nas chaves de join
+5. Persistência de DataFrames intermediários quando útil
+"""
+
+# Verificar tamanho dos DataFrames para decidir estratégia de join
+video_count = df_video.count()
+comments_count = df_comments.count()
+
+# Selecionar apenas colunas necessárias
+cols_video = ["video_id", "title", "views", "likes", "keyword"]
+cols_comments = ["video_id", "comment_text", "comment_likes", "comment_date"]
+
+# Decidir estratégia de join baseada no tamanho dos dados
+if comments_count < 1000000:  # Se pequeno o suficiente para broadcast
+    join_optimized = df_video.select(cols_video).join(
+        broadcast(df_comments.select(cols_comments)),
+        "video_id"
+    )
+else:
+    # Particionar adequadamente para join distribuído
+    df_video_opt = df_video.select(cols_video).repartition(200, "video_id")
+    df_comments_opt = df_comments.select(cols_comments).repartition(200, "video_id")
+    
+    # Aplicar filtros adicionais se necessário
+    df_comments_filtered = df_comments_opt.filter("comment_likes > 0")
+    
+    join_optimized = df_video_opt.join(df_comments_filtered, "video_id")
+
+# Mostrar plano de execução otimizado
+print("\n=== Plano de execução otimizado ===")
+join_optimized.explain(True)
+
+## 8. Salvar o join otimizado
+join_optimized.write \
+    .mode("overwrite") \
+    .parquet("join-videos-comments-otimizado")
+
+## 9. Encerrar a sessão
+spark.stop()
