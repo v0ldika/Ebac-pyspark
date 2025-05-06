@@ -1,0 +1,64 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import month, col, when
+from pyspark.ml.feature import VectorAssembler, MinMaxScaler, PCA, StringIndexer
+from pyspark.ml.regression import LinearRegression
+from pyspark.ml.evaluation import RegressionEvaluator
+from pyspark.ml import Pipeline
+
+# Iniciar a sessão Spark
+spark = SparkSession.builder.appName("VideoPreprocessing").getOrCreate()
+
+# 1. Ler o arquivo parquet
+df_video = spark.read.parquet('videos-tratados.snappy.parquet')
+
+# 2. Adicionar coluna Month com o mês de "Published At"
+df_video = df_video.withColumn("Month", month("Published At"))
+
+# 3. Adicionar coluna Keyword Index transformando keyword em valores numéricos
+keyword_indexer = StringIndexer(inputCol="keyword", outputCol="Keyword Index")
+df_video = keyword_indexer.fit(df_video).transform(df_video)
+
+# 4. Criar vetor Features com VectorAssembler
+assembler = VectorAssembler(
+    inputCols=["Likes", "Views", "Year", "Month", "Keyword Index"],
+    outputCol="Features"
+)
+df_video = assembler.transform(df_video)
+
+# 5. Adicionar coluna Features Normal com dados normalizados
+# Primeiro remover linhas com valores nulos nas features
+df_video = df_video.na.drop(subset=["Features"])
+
+# Normalizar as features
+scaler = MinMaxScaler(inputCol="Features", outputCol="Features Normal")
+scaler_model = scaler.fit(df_video)
+df_video = scaler_model.transform(df_video)
+
+# 6. Adicionar coluna Features PCA com redução para 1 componente
+pca = PCA(k=1, inputCol="Features", outputCol="Features PCA")
+pca_model = pca.fit(df_video)
+df_video = pca_model.transform(df_video)
+
+# 7. Separar em conjuntos de treino (80%) e teste (20%)
+train_data, test_data = df_video.randomSplit([0.8, 0.2], seed=42)
+
+# 8. Criar e avaliar modelo de regressão linear
+# Usando Features Normal para prever Comments
+lr = LinearRegression(featuresCol="Features Normal", labelCol="Comments")
+
+# Treinar o modelo
+lr_model = lr.fit(train_data)
+
+# Fazer previsões no conjunto de teste
+predictions = lr_model.transform(test_data)
+
+# Avaliar o modelo
+evaluator = RegressionEvaluator(labelCol="Comments", predictionCol="prediction", metricName="rmse")
+rmse = evaluator.evaluate(predictions)
+print(f"Root Mean Squared Error (RMSE) on test data = {rmse}")
+
+# 9. Salvar o dataframe preparado
+df_video.write.parquet('videos-preparados-parquet', mode='overwrite')
+
+# Encerrar a sessão Spark
+spark.stop()
