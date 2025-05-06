@@ -1,0 +1,81 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import count, mean, max, variance, min, first, last, countDistinct, year, month
+from pyspark.sql.window import Window
+from pyspark.sql.functions import col
+
+# Initialize Spark session
+spark = SparkSession.builder.appName("VideoAnalysis").getOrCreate()
+
+# 1. Read the parquet file
+df_video = spark.read.parquet('videos-preparados.snappy.parquet')
+
+# 2. Count records for each unique Keyword
+keyword_counts = df_video.groupBy("Keyword").agg(count("*").alias("Count"))
+keyword_counts.show()
+
+# 3. Calculate mean Interaction for each Keyword
+mean_interaction = df_video.groupBy("Keyword").agg(mean("Interaction").alias("Mean Interaction"))
+mean_interaction.show()
+
+# 4. Calculate max Interaction (Rank Interactions) and order descending
+max_interaction = df_video.groupBy("Keyword") \
+    .agg(max("Interaction").alias("Rank Interactions")) \
+    .orderBy(col("Rank Interactions").desc())
+max_interaction.show()
+
+# 5. Calculate mean and variance of Views for each Keyword
+views_stats = df_video.groupBy("Keyword") \
+    .agg(mean("Views").alias("Mean Views"), 
+         variance("Views").alias("Views Variance"))
+views_stats.show()
+
+# 6. Calculate mean, min, max Views (no decimals) for each Keyword
+views_summary = df_video.groupBy("Keyword") \
+    .agg(mean("Views").cast("integer").alias("Mean Views"),
+         min("Views").alias("Min Views"),
+         max("Views").alias("Max Views"))
+views_summary.show()
+
+# 7. Show first and last Published At for each Keyword
+publish_dates = df_video.groupBy("Keyword") \
+    .agg(first("Published At").alias("First Published"),
+         last("Published At").alias("Last Published"))
+publish_dates.show()
+
+# 8. Count all titles and distinct titles
+title_counts = df_video.agg(
+    count("title").alias("Total Titles"),
+    countDistinct("title").alias("Unique Titles")
+)
+title_counts.show()
+
+# 9. Count records ordered by year ascending
+yearly_counts = df_video.groupBy(year("Published At").alias("Year")) \
+    .count() \
+    .orderBy("Year")
+yearly_counts.show()
+
+# 10. Count records ordered by year and month ascending
+monthly_counts = df_video.groupBy(
+    year("Published At").alias("Year"),
+    month("Published At").alias("Month")
+) \
+.count() \
+.orderBy("Year", "Month")
+monthly_counts.show()
+
+# 11. Calculate cumulative average of Likes for each Keyword over years
+window_spec = Window.partitionBy("Keyword") \
+    .orderBy("Year") \
+    .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+
+cumulative_avg = df_video.withColumn("Year", year("Published At")) \
+    .withColumn("Cumulative Avg Likes", 
+               mean("Likes").over(window_spec)) \
+    .select("Keyword", "Year", "Cumulative Avg Likes") \
+    .distinct() \
+    .orderBy("Keyword", "Year")
+cumulative_avg.show()
+
+# Stop Spark session
+spark.stop()
